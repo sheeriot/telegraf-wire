@@ -13,6 +13,31 @@ A lightweight, optimized Telegraf setup script for quick deployment on Linux hos
 - **Versioned measurement names** (v2_ prefix) for easy migration
 - **Interactive setup** with validation
 - **Safe defaults** with minimal data collection
+- **Modern Bash 5.2+** with enhanced security and error handling
+- **Comprehensive help system** with `--help`, `--local`, and `--version` flags
+
+## Requirements
+
+- **Bash 5.2 or greater** (required for script execution - Ubuntu 24.04 includes 5.2.21)
+- **sudo access** (for live/--local mode)
+- **Telegraf** (for live/--local mode - installation instructions provided in pack mode)
+
+### Installing Bash 5.2+ (if needed)
+
+If your system doesn't have Bash 5.2+, you can install it from apt repositories:
+
+**Install Bash from apt (Ubuntu/Debian):**
+```bash
+sudo apt-get update
+sudo apt-get install bash
+```
+
+**Verify your Bash version:**
+```bash
+bash --version
+```
+
+Most modern Ubuntu systems (20.04+) come with Bash 5.2+ pre-installed, so no additional installation is typically needed.
 
 ## Quick Start
 
@@ -28,23 +53,29 @@ Or download and run locally:
 
 ```bash
 ./scripts/setup-telegraf.sh pack
+# or simply:
+./scripts/setup-telegraf.sh
 ```
 
 This creates an `output_YYMMDD_HHMMSS/` folder containing:
 - `telegraf.conf` - Telegraf configuration
 - `telegraf.env` - Environment variables (keep secure!)
 
-### Live Mode
+After generation, the script displays complete Telegraf installation instructions for using the generated files.
+
+### Live Mode (--local)
 
 Install and configure Telegraf directly on the current host (requires sudo):
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/sheeriot/telegraf-wire/trunk/scripts/setup-telegraf.sh | bash -s live
+curl -sSL https://raw.githubusercontent.com/sheeriot/telegraf-wire/trunk/scripts/setup-telegraf.sh | bash -s -- --local
 ```
 
 Or download and run locally:
 
 ```bash
+./scripts/setup-telegraf.sh --local
+# or:
 ./scripts/setup-telegraf.sh live
 ```
 
@@ -116,7 +147,7 @@ The script generates a minimal but effective Telegraf configuration:
 ```
 /etc/telegraf/dev/
 ├── scripts/
-│   └── setup-telegraf.sh
+│   └── setup-telegraf.sh    # Main Telegraf setup script (requires Bash 5.2+)
 ├── .gitignore
 └── README.md
 ```
@@ -138,7 +169,56 @@ The script generates a minimal but effective Telegraf configuration:
 curl -sSL https://raw.githubusercontent.com/sheeriot/telegraf-wire/trunk/scripts/setup-telegraf.sh | bash -s live
 ```
 
+## Command Line Options
+
+The setup script supports several options:
+
+```bash
+./scripts/setup-telegraf.sh [OPTIONS] [MODE]
+
+Options:
+  -h, --help      Show comprehensive help message
+  -v, --version   Show version information
+
+Modes:
+  pack (default)  Generate configuration files in timestamped folder
+  live, --local   Install configuration directly to /etc/telegraf/
+```
+
+**Examples:**
+```bash
+# Show help
+./scripts/setup-telegraf.sh --help
+
+# Show version
+./scripts/setup-telegraf.sh --version
+
+# Generate configs (default)
+./scripts/setup-telegraf.sh
+./scripts/setup-telegraf.sh pack
+
+# Install locally
+./scripts/setup-telegraf.sh --local
+./scripts/setup-telegraf.sh live
+```
+
 ## Troubleshooting
+
+### Bash version too old
+
+If you see an error about Bash 5.2+ being required:
+
+```bash
+# Check your current version
+bash --version
+
+# Install Bash from apt (Ubuntu/Debian)
+sudo apt-get update
+sudo apt-get install bash
+
+# Verify installation
+bash --version
+```
 
 ### Permission denied in live mode
 
@@ -211,13 +291,17 @@ Related metrics (like temperature and humidity, or wind speed and wind chill) sh
 
 ### How the Script Works
 
-1. **Mode Detection**: Script accepts `pack` or `live` as first argument (defaults to `pack`)
-2. **Input Collection**: Interactive prompts validate required fields and handle defaults
-3. **Config Generation**: Uses heredoc to generate `telegraf.conf` with all optimizations
-4. **Environment File**: Creates `telegraf.env` with all InfluxDB connection details
-5. **File Installation** (live mode only):
-   - Backs up existing files with `.bak` extension
+1. **Version Check**: Verifies Bash 5.2+ is available
+2. **Web Execution Detection**: Warns if running from pipe (curl | bash)
+3. **Mode Detection**: Script accepts `pack`, `live`, `--local`, or flags like `--help`
+4. **Input Collection**: Interactive prompts with validation (URLs, hostnames, identifiers)
+5. **Input Sanitization**: All inputs are sanitized to prevent code injection
+6. **Config Generation**: Uses heredoc to generate `telegraf.conf` with all optimizations
+7. **Environment File**: Creates `telegraf.env` with safely quoted variables
+8. **File Installation** (live mode only):
+   - Backs up existing files with timestamped `.bak` extension
    - Writes new files with proper permissions (644 for conf, 600 for env)
+9. **Installation Instructions**: Pack mode displays complete Telegraf setup guide
 
 ### Measurement Renaming
 
