@@ -21,7 +21,7 @@ A lightweight, optimized Telegraf setup script for quick deployment on Linux hos
 Generate configuration files in a timestamped output folder:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/sheeriot/telegraf-wire/main/scripts/setup-telegraf.sh | bash
+curl -sSL https://raw.githubusercontent.com/sheeriot/telegraf-wire/trunk/scripts/setup-telegraf.sh | bash
 ```
 
 Or download and run locally:
@@ -39,7 +39,7 @@ This creates an `output_YYMMDD_HHMMSS/` folder containing:
 Install and configure Telegraf directly on the current host (requires sudo):
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/sheeriot/telegraf-wire/main/scripts/setup-telegraf.sh | bash -s live
+curl -sSL https://raw.githubusercontent.com/sheeriot/telegraf-wire/trunk/scripts/setup-telegraf.sh | bash -s live
 ```
 
 Or download and run locally:
@@ -135,7 +135,7 @@ The script generates a minimal but effective Telegraf configuration:
 
 ```bash
 # One command to install and configure
-curl -sSL https://raw.githubusercontent.com/sheeriot/telegraf-wire/main/scripts/setup-telegraf.sh | bash -s live
+curl -sSL https://raw.githubusercontent.com/sheeriot/telegraf-wire/trunk/scripts/setup-telegraf.sh | bash -s live
 ```
 
 ## Troubleshooting

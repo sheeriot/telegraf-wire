@@ -7,7 +7,7 @@
 #   pack (default) - Generate files in timestamped output folder
 #   live           - Install on current host (requires sudo)
 #
-# Can be run via: curl -sSL https://raw.githubusercontent.com/sheeriot/telegraf-wire/main/scripts/setup-telegraf.sh | bash
+# Can be run via: curl -sSL https://raw.githubusercontent.com/sheeriot/telegraf-wire/trunk/scripts/setup-telegraf.sh | bash
 
 set -euo pipefail
 
