@@ -170,6 +170,120 @@ Check that environment variables are loaded:
 sudo telegraf --config /etc/telegraf/telegraf.conf --test
 ```
 
+## Design Philosophy & Rationale
+
+### Why Versioned Measurement Names?
+
+Using versioned measurement names (e.g., `v2_cpu`, `v3_cpu`) provides several benefits:
+
+1. **Easy Migration**: When you need to change measurement structure, you can create `v3_*` measurements without breaking existing queries or dashboards that use `v2_*`
+2. **A/B Testing**: Run both versions simultaneously during migration to compare data quality
+3. **Rollback Capability**: If new structure has issues, you can quickly switch back to previous version
+4. **Consistency**: Matches the pattern used in SensorPlaces app (e.g., `v2_wind`, `v3_wind`)
+
+### Why Different Collection Intervals?
+
+Metrics are collected at different intervals based on their change frequency and monitoring needs:
+
+- **CPU (2 min)**: Changes frequently, needs near-real-time monitoring for performance issues
+- **Memory/System (5 min)**: Changes less frequently, 5-minute intervals provide good balance between data freshness and storage efficiency
+- **Disk (1 hour)**: Changes very slowly, hourly collection is sufficient and significantly reduces data volume
+
+This approach minimizes data storage costs while maintaining adequate monitoring granularity.
+
+### Why Separate Measurements?
+
+Related metrics (like temperature and humidity, or wind speed and wind chill) should be grouped together in the same measurement. However, for system metrics, we keep them separate (CPU, memory, disk, system) because:
+
+- They have different collection intervals
+- They serve different monitoring purposes
+- Telegraf's default structure already separates them
+- Versioning allows future restructuring if needed
+
+### Agent Configuration Choices
+
+- **Base interval (60s)**: Minimum interval for inputs that don't specify their own
+- **Batch size (1000)**: Balances network efficiency with memory usage
+- **Buffer limit (3000)**: Allows temporary network outages without data loss
+- **Precision (1s)**: Sufficient for system metrics, reduces timestamp storage overhead
+
+## Implementation Details
+
+### How the Script Works
+
+1. **Mode Detection**: Script accepts `pack` or `live` as first argument (defaults to `pack`)
+2. **Input Collection**: Interactive prompts validate required fields and handle defaults
+3. **Config Generation**: Uses heredoc to generate `telegraf.conf` with all optimizations
+4. **Environment File**: Creates `telegraf.env` with all InfluxDB connection details
+5. **File Installation** (live mode only):
+   - Backs up existing files with `.bak` extension
+   - Writes new files with proper permissions (644 for conf, 600 for env)
+
+### Measurement Renaming
+
+The script uses Telegraf's `processors.rename` plugin to version measurement names:
+
+```toml
+[[processors.rename]]
+  [[processors.rename.replace]]
+    measurement = "cpu"
+    dest = "v2_cpu"
+```
+
+This happens after data collection but before sending to InfluxDB, ensuring all metrics are properly versioned.
+
+### Environment Variable Usage
+
+Telegraf automatically loads environment variables from `/etc/telegraf/telegraf.env` (or uses system environment). The config file references them using `${VARIABLE_NAME}` syntax, keeping secrets out of the configuration file itself.
+
+## Integration with SensorPlaces
+
+This Telegraf setup complements the SensorPlaces application:
+
+- **Consistent Naming**: Both use `v2_*` prefix for measurements
+- **Same InfluxDB Bucket**: Can share the same bucket or use separate buckets
+- **Migration Strategy**: Both can migrate to `v3_*` simultaneously when needed
+- **Measurement Grouping**: SensorPlaces groups related metrics (wind speed + wind chill), while Telegraf keeps system metrics separate due to different collection intervals
+
+## Migration Strategy
+
+When ready to migrate to `v3_*` measurements:
+
+1. Update the script to generate `v3_*` measurement names
+2. Deploy new configuration (old `v2_*` data remains in database)
+3. Update dashboards/queries to use `v3_*` measurements
+4. Keep `v2_*` data for historical reference
+5. Optionally archive or delete `v2_*` data after retention period
+
+## Best Practices
+
+1. **Use Pack Mode First**: Generate configs in pack mode, review them, then deploy manually or use live mode
+2. **Test Configuration**: Always test generated configs with `telegraf --config telegraf.conf --test` before deploying
+3. **Backup Before Live Mode**: The script backs up automatically, but consider manual backups for critical systems
+4. **Secure Environment Files**: Never commit `telegraf.env` to version control (already in `.gitignore`)
+5. **Monitor Data Volume**: Check InfluxDB data retention policies to avoid unexpected storage costs
+6. **Version Control**: Keep track of which hosts are using which measurement version
+
+## Advanced Usage
+
+### Customizing Collection Intervals
+
+To modify intervals, edit the `generate_config()` function in `setup-telegraf.sh`:
+
+```bash
+# Change CPU interval to 60s
+[[inputs.cpu]]
+  interval = "60s"  # Changed from 120s
+```
+
+### Adding Additional Inputs
+
+To add more Telegraf inputs (e.g., network, processes), add them to the `generate_config()` function before the rename processors.
+
+### Using Different Measurement Versions
+
+To generate `v3_*` measurements, update all `dest = "v2_*"` lines in the rename processors to `dest = "v3_*"`.
+
 ## License
 
 This script is provided as-is for use in setting up Telegraf configurations.
