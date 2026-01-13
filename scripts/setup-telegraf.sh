@@ -24,7 +24,8 @@ readonly BLUE='\033[0;34m'
 readonly NC='\033[0m' # No Color
 
 # Global variables
-declare MODE="pack"
+declare MODE=""
+declare MODE_SET_VIA_ARGS=false
 declare -A CONFIG=(
     [hostname]=""
     [influx_url]=""
@@ -80,6 +81,7 @@ check_bash_version() {
 
 # Detect if script is running from pipe (web execution)
 detect_web_execution() {
+    # If stdin is a TTY and script file exists, not from pipe
     if [[ -t 0 ]] && [[ -f "${BASH_SOURCE[0]}" ]]; then
         return 1  # Not from pipe
     else
@@ -94,7 +96,18 @@ warn_web_execution() {
         warn "Please review the script source before executing:"
         warn "  ${BASH_SOURCE[0]:-unknown}"
         echo ""
-        read -r -p "Continue anyway? (yes/no): " confirm
+        
+        # Check if we have an interactive terminal for confirmation
+        if [[ ! -t 0 ]]; then
+            error "This script requires an interactive terminal for safe execution."
+            error "Please download and review the script before running it locally."
+            exit 1
+        fi
+        
+        read -r -p "Continue anyway? (yes/no): " confirm || {
+            error "Failed to read input. Please run from an interactive terminal."
+            exit 1
+        }
         if [[ ! "${confirm,,}" =~ ^(yes|y)$ ]]; then
             info "Execution cancelled by user."
             exit 0
@@ -226,31 +239,29 @@ ${GREEN}Usage:${NC} ${SCRIPT_NAME} [OPTIONS] [MODE]
 
 ${GREEN}Modes:${NC}
   pack (default)     Generate configuration files in timestamped folder
-  live, --local      Install configuration directly to /etc/telegraf/ (requires sudo)
+  live               Install configuration directly to /etc/telegraf/ (requires sudo)
 
 ${GREEN}Options:${NC}
   -h, --help         Show this help message
   -v, --version      Show version information
 
 ${GREEN}Examples:${NC}
-  # Generate config files (pack mode - default)
+  # Generate config files (pack mode - default, will prompt for mode)
   ./${SCRIPT_NAME}
   ./${SCRIPT_NAME} pack
   
-  # Install locally (requires sudo)
-  ./${SCRIPT_NAME} --local
+  # Install locally (requires sudo, will prompt for mode)
   ./${SCRIPT_NAME} live
   
   # Run from web
   curl -sSL https://raw.githubusercontent.com/sheeriot/telegraf-wire/trunk/scripts/${SCRIPT_NAME} | bash
-  curl -sSL https://raw.githubusercontent.com/sheeriot/telegraf-wire/trunk/scripts/${SCRIPT_NAME} | bash -s -- --local
 
 ${GREEN}Description:${NC}
   This script generates optimized Telegraf configuration files with versioned
   measurement names (v2_ prefix) and optimized collection intervals.
   
-  In pack mode, files are generated in a timestamped output folder.
-  In live/--local mode, files are installed directly to /etc/telegraf/.
+  When run interactively, you'll be prompted to choose between pack mode (generate
+  files in a timestamped output folder) or live mode (install directly to /etc/telegraf/).
   
 ${GREEN}Security:${NC}
   - All inputs are validated and sanitized
@@ -286,11 +297,9 @@ parse_arguments() {
                 show_version
                 exit 0
                 ;;
-            --local)
-                MODE="live"
-                ;;
             pack|live)
                 MODE="${args[$i]}"
+                MODE_SET_VIA_ARGS=true
                 ;;
             *)
                 error "Unknown option: ${args[$i]}"
@@ -326,9 +335,9 @@ backup_file() {
 generate_config() {
     cat <<'EOF'
 [agent]
-  interval = "60s"
+  interval = "120s"
   round_interval = true
-  flush_interval = "60s"
+  flush_interval = "120s"
   flush_jitter = "0s"
 
   metric_batch_size = 1000
@@ -336,8 +345,7 @@ generate_config() {
 
   precision = "1s"
 
-  # safest: omit this line (defaults to system hostname)
-  # hostname = "${HOSTNAME}"
+  hostname = "${HOSTNAME}"
   omit_hostname = false
 
   skip_processors_after_aggregators = true
@@ -404,7 +412,10 @@ generate_env() {
     local influx_bucket="${4:-}"
     local influx_token="${5:-}"
     
-    # Use ${var@Q} for safe quoting (Bash 5.2+ feature)
+    # Generate env file compatible with systemd EnvironmentFile
+    # systemd supports both quoted and unquoted values, but quoting is necessary
+    # for values containing spaces or special characters to prevent truncation
+    # Use ${var@Q} for safe shell quoting (Bash 5.2+ feature)
     cat <<EOF
 HOSTNAME=${hostname@Q}
 
@@ -416,6 +427,24 @@ INFLUX_URL=${influx_url@Q}
 EOF
 }
 
+# Check if running on Debian/Ubuntu
+is_debian_system() {
+    # /etc/debian_version is the definitive marker for Debian systems
+    # Check it first, then fall back to os-release if needed
+    if [[ -f /etc/debian_version ]]; then
+        return 0
+    fi
+    
+    # Check os-release as fallback for Ubuntu/Debian derivatives
+    if [[ -f /etc/os-release ]]; then
+        if grep -qiE '^(ID|ID_LIKE)=.*(debian|ubuntu)' /etc/os-release; then
+            return 0
+        fi
+    fi
+    
+    return 1
+}
+
 # Show Telegraf installation instructions for pack mode
 show_telegraf_install_instructions() {
     local output_dir="$1"
@@ -424,9 +453,19 @@ show_telegraf_install_instructions() {
     info "To install Telegraf and use these configuration files:"
     echo ""
     echo "1. Install Telegraf:"
-    echo "   # Ubuntu/Debian:"
-    echo "   sudo apt-get update"
-    echo "   sudo apt-get install -y telegraf"
+    echo "   # Ubuntu/Debian (recommended - checks status first):"
+    echo "   ./scripts/install-telegraf.sh"
+    echo ""
+    echo "   # Or manually:"
+    echo "   curl --silent --location -O https://repos.influxdata.com/influxdata-archive.key"
+    echo "   gpg --show-keys --with-fingerprint --with-colons ./influxdata-archive.key 2>&1 \\"
+    echo "   | grep -q '^fpr:\+24C975CBA61A024EE1B631787C3D57159FC2F927:\$' \\"
+    echo "   && cat influxdata-archive.key \\"
+    echo "   | gpg --dearmor \\"
+    echo "   | sudo tee /etc/apt/keyrings/influxdata-archive.gpg > /dev/null \\"
+    echo "   && echo 'deb [signed-by=/etc/apt/keyrings/influxdata-archive.gpg] https://repos.influxdata.com/debian stable main' \\"
+    echo "   | sudo tee /etc/apt/sources.list.d/influxdata.list"
+    echo "   sudo apt-get update && sudo apt-get install telegraf"
     echo ""
     echo "   # RHEL/CentOS/Rocky Linux:"
     echo "   sudo yum install -y telegraf"
@@ -449,6 +488,145 @@ show_telegraf_install_instructions() {
     echo ""
     echo "5. Verify it's working:"
     echo "   sudo telegraf --config /etc/telegraf/telegraf.conf --test"
+    echo ""
+}
+
+# Check sudo access
+check_sudo_access() {
+    if ! sudo -n true 2>/dev/null; then
+        warn "This requires sudo access. You may be prompted for your password."
+        if ! sudo -v; then
+            error "Failed to obtain sudo access. Exiting."
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# Handle Telegraf installation prompt
+handle_telegraf_installation() {
+    local output_dir="$1"
+    
+    echo ""
+    read -r -p "Install and configure Telegraf automatically? (requires sudo) (yes/no): " install_choice
+    if [[ ! "${install_choice,,}" =~ ^(yes|y)$ ]]; then
+        echo ""
+        read -r -p "Show manual installation instructions? (yes/no): " show_manual
+        if [[ "${show_manual,,}" =~ ^(yes|y)$ ]]; then
+            show_telegraf_install_instructions "$output_dir"
+        fi
+        return
+    fi
+    
+    if ! is_debian_system; then
+        warn "Automatic installation is only available for Debian/Ubuntu systems."
+        echo ""
+        read -r -p "Show manual installation instructions? (yes/no): " show_manual
+        if [[ "${show_manual,,}" =~ ^(yes|y)$ ]]; then
+            show_telegraf_install_instructions "$output_dir"
+        fi
+        return
+    fi
+    
+    if ! check_sudo_access; then
+        return
+    fi
+    
+    echo ""
+    info "Installing and configuring Telegraf..."
+    
+    # Step 1: Install Telegraf software
+    info "Step 1: Installing Telegraf..."
+    local install_script=""
+    if [[ -f "${SCRIPT_DIR}/install-telegraf.sh" ]]; then
+        install_script="${SCRIPT_DIR}/install-telegraf.sh"
+    elif [[ -f "./scripts/install-telegraf.sh" ]]; then
+        install_script="./scripts/install-telegraf.sh"
+    elif [[ -f "install-telegraf.sh" ]]; then
+        install_script="./install-telegraf.sh"
+    fi
+    
+    if [[ -z "$install_script" ]] || [[ ! -f "$install_script" ]]; then
+        error "Installation script not found."
+        show_telegraf_install_instructions "$output_dir"
+        return
+    fi
+    
+    bash "$install_script" || {
+        error "Installation failed."
+        read -r -p "Show manual instructions? (yes/no): " show_manual
+        [[ "${show_manual,,}" =~ ^(yes|y)$ ]] && show_telegraf_install_instructions "$output_dir"
+        return
+    }
+    
+    # Step 2: Install config files
+    info "Step 2: Installing configuration..."
+    [[ ! -d "/etc/telegraf" ]] && sudo mkdir -p /etc/telegraf
+    
+    if [[ -f "/etc/telegraf/telegraf.conf" ]]; then
+        sudo cp /etc/telegraf/telegraf.conf "/etc/telegraf/telegraf.conf.bak.$(generate_timestamp)" 2>/dev/null || true
+    fi
+    if [[ -f "/etc/telegraf/telegraf.env" ]]; then
+        sudo cp /etc/telegraf/telegraf.env "/etc/telegraf/telegraf.env.bak.$(generate_timestamp)" 2>/dev/null || true
+    fi
+    
+    sudo cp "${output_dir}/telegraf.conf" /etc/telegraf/ && \
+    sudo cp "${output_dir}/telegraf.env" /etc/telegraf/ && \
+    sudo chmod 644 /etc/telegraf/telegraf.conf && \
+    sudo chmod 600 /etc/telegraf/telegraf.env || {
+        error "Failed to install configuration files."
+        return
+    }
+    
+    # Create symlink from /etc/default/telegraf to /etc/telegraf/telegraf.env
+    # This allows systemd to load the env file while keeping the better-named file
+    if [[ -f "/etc/default/telegraf" ]] && [[ ! -L "/etc/default/telegraf" ]]; then
+        # Backup existing file if it's not already a symlink
+        sudo cp /etc/default/telegraf "/etc/default/telegraf.bak.$(generate_timestamp)" 2>/dev/null || true
+        sudo rm -f /etc/default/telegraf
+    fi
+    
+    # Create or update symlink
+    sudo ln -sf /etc/telegraf/telegraf.env /etc/default/telegraf || {
+        error "Failed to create symlink"
+        return
+    }
+    
+    # Step 3: Enable and start service
+    info "Step 3: Starting service..."
+    sudo systemctl enable telegraf && sudo systemctl restart telegraf || {
+        error "Failed to start service."
+        return
+    }
+    
+    # Step 4: Validate
+    info "Step 4: Validating..."
+    local status_ok=true
+    sudo systemctl is-active --quiet telegraf && info "✓ Service running" || { warn "✗ Service not running"; status_ok=false; }
+    sudo systemctl is-enabled --quiet telegraf && info "✓ Auto-start enabled" || { warn "✗ Auto-start disabled"; status_ok=false; }
+    sudo telegraf --config /etc/telegraf/telegraf.conf --test > /dev/null 2>&1 && info "✓ Config test passed" || { warn "✗ Config test failed"; status_ok=false; }
+    
+    echo ""
+    if [[ "$status_ok" == "true" ]]; then
+        info "Complete!"
+    else
+        warn "Complete with warnings."
+    fi
+    
+    echo ""
+    info "Useful commands to inspect and test:"
+    echo ""
+    echo "  Check service status:"
+    echo "    sudo systemctl status telegraf"
+    echo ""
+    echo "  View recent logs:"
+    echo "    sudo journalctl -u telegraf -n 50 --no-pager"
+    echo ""
+    echo "  Follow logs in real-time:"
+    echo "    sudo journalctl -u telegraf -f"
+    echo ""
+    echo "  Test configuration:"
+    echo "    sudo telegraf --config /etc/telegraf/telegraf.conf --test"
     echo ""
 }
 
@@ -482,7 +660,7 @@ pack_mode() {
     system_hostname=$(hostname 2>/dev/null || echo "localhost")
     
     prompt_input CONFIG[hostname] "Hostname" "$system_hostname" "false" "validate_hostname"
-    prompt_input CONFIG[influx_url] "InfluxDB URL" "" "true" "validate_url"
+    prompt_input CONFIG[influx_url] "InfluxDB URL" "https://us-east-1-1.aws.cloud2.influxdata.com" "true" "validate_url"
     prompt_input CONFIG[influx_org] "InfluxDB Organization" "" "true" "validate_identifier"
     prompt_input CONFIG[influx_bucket] "InfluxDB Bucket" "" "true" "validate_identifier"
     prompt_secret CONFIG[influx_token] "InfluxDB Token"
@@ -516,13 +694,17 @@ pack_mode() {
     echo ""
     warn "Remember to keep telegraf.env secure - it contains your InfluxDB token!"
     
-    # Show installation instructions
-    show_telegraf_install_instructions "$output_dir"
+    # Handle Telegraf installation
+    handle_telegraf_installation "$output_dir"
 }
 
 # Check sudo access for live mode
 check_sudo() {
     if ! sudo -n true 2>/dev/null; then
+        if [[ ! -t 0 ]]; then
+            error "Live mode requires sudo access and an interactive terminal."
+            exit 1
+        fi
         warn "Live mode requires sudo access. You may be prompted for your password."
         if ! sudo -v; then
             error "Failed to obtain sudo access. Exiting."
@@ -532,9 +714,85 @@ check_sudo() {
     info "Sudo access confirmed for live mode."
 }
 
+# Mask token for display (first 4 and last 4 visible)
+mask_token() {
+    local token="$1"
+    local len=${#token}
+    
+    if [[ $len -le 8 ]]; then
+        # If token is 8 chars or less, just show asterisks
+        echo "****"
+    else
+        # Show first 4, ..., last 4
+        echo "${token:0:4}...${token: -4}"
+    fi
+}
+
+# Read existing config from telegraf.env
+read_existing_config() {
+    local env_file="/etc/telegraf/telegraf.env"
+    
+    if [[ ! -f "$env_file" ]]; then
+        return 1
+    fi
+    
+    # Read and parse env file
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Skip comments and empty lines
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line// }" ]] && continue
+        
+        # Parse KEY=VALUE format
+        if [[ "$line" =~ ^([^=]+)=(.*)$ ]]; then
+            local key="${BASH_REMATCH[1]// /}"
+            local value="${BASH_REMATCH[2]}"
+            
+            # Remove quotes (handles both single and double quotes, including shell-quoted format)
+            value="${value#\"}"
+            value="${value%\"}"
+            value="${value#\'}"
+            value="${value%\'}"
+            value="${value#$'\\''}"
+            value="${value%$'\\''}"
+            
+            case "$key" in
+                HOSTNAME)
+                    CONFIG[hostname]="$value"
+                    ;;
+                INFLUX_URL)
+                    CONFIG[influx_url]="$value"
+                    ;;
+                INFLUX_ORG)
+                    CONFIG[influx_org]="$value"
+                    ;;
+                INFLUX_BUCKET)
+                    CONFIG[influx_bucket]="$value"
+                    ;;
+                INFLUX_TOKEN)
+                    CONFIG[influx_token]="$value"
+                    ;;
+            esac
+        fi
+    done < <(sudo cat "$env_file" 2>/dev/null)
+    
+    # Verify we got at least the required fields
+    if [[ -z "${CONFIG[influx_url]}" ]] || [[ -z "${CONFIG[influx_org]}" ]] || \
+       [[ -z "${CONFIG[influx_bucket]}" ]] || [[ -z "${CONFIG[influx_token]}" ]]; then
+        return 1
+    fi
+    
+    return 0
+}
+
 # Live mode: Install files to /etc/telegraf/
 live_mode() {
     info "Running in LIVE mode - installing to /etc/telegraf/"
+    
+    # Check if we have a TTY for interactive input
+    if [[ ! -t 0 ]]; then
+        error "Live mode requires an interactive terminal. Please run from a terminal."
+        exit 1
+    fi
     
     check_sudo
     
@@ -547,19 +805,74 @@ live_mode() {
         }
     fi
     
-    # Collect environment variables
-    echo ""
-    info "Please provide the following configuration:"
-    echo ""
+    # Read existing config if it exists
+    local has_existing=false
+    if [[ -f "/etc/telegraf/telegraf.env" ]]; then
+        if read_existing_config; then
+            has_existing=true
+            echo ""
+            info "Found existing configuration:"
+            echo ""
+            echo "  Hostname: ${CONFIG[hostname]:-(not set)}"
+            echo "  InfluxDB URL: ${CONFIG[influx_url]:-(not set)}"
+            echo "  Organization: ${CONFIG[influx_org]:-(not set)}"
+            echo "  Bucket: ${CONFIG[influx_bucket]:-(not set)}"
+            if [[ -n "${CONFIG[influx_token]:-}" ]]; then
+                echo "  Token: $(mask_token "${CONFIG[influx_token]}")"
+            else
+                echo "  Token: (not set)"
+            fi
+        else
+            warn "Existing config file found but could not be read. Will prompt for new values."
+        fi
+    fi
     
-    local system_hostname
-    system_hostname=$(hostname 2>/dev/null || echo "localhost")
+    # Ask if they want to use existing or change
+    local use_existing=false
+    if [[ "$has_existing" == "true" ]]; then
+        echo ""
+        read -r -p "Use existing configuration? (yes/no): " use_existing_choice || {
+            error "Failed to read input. Please ensure you're running from an interactive terminal."
+            exit 1
+        }
+        if [[ "${use_existing_choice,,}" =~ ^(yes|y)$ ]]; then
+            use_existing=true
+            info "Using existing configuration."
+        fi
+    fi
     
-    prompt_input CONFIG[hostname] "Hostname" "$system_hostname" "false" "validate_hostname"
-    prompt_input CONFIG[influx_url] "InfluxDB URL" "" "true" "validate_url"
-    prompt_input CONFIG[influx_org] "InfluxDB Organization" "" "true" "validate_identifier"
-    prompt_input CONFIG[influx_bucket] "InfluxDB Bucket" "" "true" "validate_identifier"
-    prompt_secret CONFIG[influx_token] "InfluxDB Token"
+    # Collect environment variables (skip if using existing, otherwise use existing as defaults)
+    if [[ "$use_existing" != "true" ]]; then
+        echo ""
+        info "Please provide the following configuration:"
+        echo ""
+        
+        # Set defaults from existing config or system defaults
+        local default_hostname="${CONFIG[hostname]:-}"
+        if [[ -z "$default_hostname" ]]; then
+            default_hostname=$(hostname 2>/dev/null || echo "localhost")
+        fi
+        
+        local default_url="${CONFIG[influx_url]:-https://us-east-1-1.aws.cloud2.influxdata.com}"
+        local default_org="${CONFIG[influx_org]:-}"
+        local default_bucket="${CONFIG[influx_bucket]:-}"
+        
+        prompt_input CONFIG[hostname] "Hostname" "$default_hostname" "false" "validate_hostname"
+        prompt_input CONFIG[influx_url] "InfluxDB URL" "$default_url" "true" "validate_url"
+        prompt_input CONFIG[influx_org] "InfluxDB Organization" "$default_org" "true" "validate_identifier"
+        prompt_input CONFIG[influx_bucket] "InfluxDB Bucket" "$default_bucket" "true" "validate_identifier"
+        
+        # For token, if we have existing, ask if they want to keep it
+        if [[ -n "${CONFIG[influx_token]:-}" ]]; then
+            echo ""
+            read -r -p "Keep existing InfluxDB Token? (yes/no): " keep_token
+            if [[ ! "${keep_token,,}" =~ ^(yes|y)$ ]]; then
+                prompt_secret CONFIG[influx_token] "InfluxDB Token"
+            fi
+        else
+            prompt_secret CONFIG[influx_token] "InfluxDB Token"
+        fi
+    fi
     
     # Backup existing files
     backup_file "/etc/telegraf/telegraf.conf"
@@ -587,14 +900,45 @@ live_mode() {
     sudo chmod 644 /etc/telegraf/telegraf.conf
     sudo chmod 600 /etc/telegraf/telegraf.env
     
+    # Create symlink from /etc/default/telegraf to /etc/telegraf/telegraf.env
+    # This allows systemd to load the env file while keeping the better-named file
+    if [[ -f "/etc/default/telegraf" ]] && [[ ! -L "/etc/default/telegraf" ]]; then
+        # Backup existing file if it's not already a symlink
+        sudo cp /etc/default/telegraf "/etc/default/telegraf.bak.$(generate_timestamp)" 2>/dev/null || true
+        sudo rm -f /etc/default/telegraf
+    fi
+    
+    # Create or update symlink
+    sudo ln -sf /etc/telegraf/telegraf.env /etc/default/telegraf || {
+        error "Failed to create symlink"
+        exit 1
+    }
+    
     echo ""
-    info "Configuration installed successfully to /etc/telegraf/"
-    info "  - telegraf.conf (backed up if existed)"
-    info "  - telegraf.env (backed up if existed)"
+    info "Configuration installed successfully."
+    
+    # Restart service
+    if systemctl is-active --quiet telegraf 2>/dev/null || systemctl is-enabled --quiet telegraf 2>/dev/null; then
+        info "Restarting Telegraf service..."
+        sudo systemctl restart telegraf && info "Service restarted." || warn "Failed to restart service."
+    fi
+    
+    # Show helpful commands
     echo ""
-    info "You may need to restart Telegraf service:"
-    echo "  sudo systemctl restart telegraf"
-    echo "  sudo systemctl status telegraf"
+    info "Useful commands to inspect and test:"
+    echo ""
+    echo "  Check service status:"
+    echo "    sudo systemctl status telegraf"
+    echo ""
+    echo "  View recent logs:"
+    echo "    sudo journalctl -u telegraf -n 50 --no-pager"
+    echo ""
+    echo "  Follow logs in real-time:"
+    echo "    sudo journalctl -u telegraf -f"
+    echo ""
+    echo "  Test configuration:"
+    echo "    sudo telegraf --config /etc/telegraf/telegraf.conf --test"
+    echo ""
 }
 
 # Main function
@@ -611,8 +955,39 @@ main() {
     echo "=========================================="
     echo "  Telegraf Setup Script"
     echo "  Version: ${SCRIPT_VERSION}"
-    echo "  Mode: ${MODE}"
     echo "=========================================="
+    echo ""
+    
+    # Ask for mode if not specified via command line
+    if [[ "$MODE_SET_VIA_ARGS" != "true" ]]; then
+        if [[ -t 0 ]]; then
+            echo "Select mode:"
+            echo "  1) Pack - Generate config files in output folder (default)"
+            echo "  2) Live - Install directly to /etc/telegraf/ (requires sudo)"
+            echo ""
+            read -r -p "Enter choice [1]: " mode_choice
+            mode_choice="${mode_choice:-1}"
+            
+            case "$mode_choice" in
+                1|pack)
+                    MODE="pack"
+                    ;;
+                2|live)
+                    MODE="live"
+                    ;;
+                *)
+                    warn "Invalid choice, using pack mode."
+                    MODE="pack"
+                    ;;
+            esac
+        else
+            # Non-interactive, default to pack
+            MODE="pack"
+        fi
+    fi
+    
+    echo ""
+    info "Mode: ${MODE}"
     echo ""
     
     case "$MODE" in
